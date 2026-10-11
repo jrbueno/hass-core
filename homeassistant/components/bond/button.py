@@ -1,18 +1,23 @@
 """Support for bond buttons."""
 
 from dataclasses import dataclass
-from typing import override
+import logging
+from typing import Any, override
 
-from bond_async import Action
+from aiohttp import ClientError
+from bond_async import Action, Bond
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util.async_ import gather_with_limited_concurrency
 
 from . import BondConfigEntry
 from .entity import BondEntity
 from .models import BondData
-from .utils import BondDevice
+from .utils import MAX_REQUESTS, BondDevice
+
+_LOGGER = logging.getLogger(__name__)
 
 # The api requires a step size even though it does not
 # seem to matter what is is as the underlying device is likely
@@ -275,7 +280,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up Bond button devices."""
     data = entry.runtime_data
-    entities: list[BondButtonEntity] = []
+    entities: list[ButtonEntity] = []
 
     for device in data.hub.devices:
         device_entities = [
@@ -295,8 +300,48 @@ async def async_setup_entry(
         if device.has_action(PRESET_BUTTON.key):
             device_entities.append(BondButtonEntity(data, device, PRESET_BUTTON))
         entities.extend(device_entities)
+        if device.has_commands:
+            covered = {entity.entity_description.key for entity in device_entities}
+            entities.extend(
+                BondCommandButtonEntity(data, device, command)
+                for command in await _async_get_commands(data.hub.bond, device)
+                if command.argument is not None or command.action not in covered
+            )
 
     async_add_entities(entities)
+
+
+@dataclass(frozen=True, kw_only=True)
+class BondCommand:
+    """A button as shown in the Bond app."""
+
+    command_id: str
+    name: str
+    action: str | None
+    argument: Any
+
+
+async def _async_get_commands(bond: Bond, device: BondDevice) -> list[BondCommand]:
+    """Return the visible commands of a bridge device."""
+    try:
+        command_ids = await bond.device_commands(device.device_id)
+        details = await gather_with_limited_concurrency(
+            MAX_REQUESTS,
+            *(bond.device_command(device.device_id, cid) for cid in command_ids),
+        )
+    except (ClientError, TimeoutError) as err:
+        _LOGGER.warning("Unable to fetch commands for %s: %s", device.name, err)
+        return []
+    return [
+        BondCommand(
+            command_id=command_id,
+            name=detail.get("name") or command_id,
+            action=detail.get("action"),
+            argument=detail.get("argument"),
+        )
+        for command_id, detail in zip(command_ids, details, strict=True)
+        if not detail.get("hidden")
+    ]
 
 
 class BondButtonEntity(BondEntity, ButtonEntity):
@@ -324,6 +369,37 @@ class BondButtonEntity(BondEntity, ButtonEntity):
         else:
             action = Action(key)
         await self._bond.action(self._device_id, action)
+
+    @override
+    def _apply_state(self) -> None:
+        """Apply the state."""
+
+
+class BondCommandButtonEntity(BondEntity, ButtonEntity):
+    """A Bond app button (device command)."""
+
+    def __init__(
+        self,
+        data: BondData,
+        device: BondDevice,
+        command: BondCommand,
+    ) -> None:
+        """Init Bond command button."""
+        self._command = command
+        super().__init__(data, device, None, f"command_{command.command_id}")
+        self._attr_name = f"{device.name} {command.name}"
+
+    @override
+    async def async_press(self) -> None:
+        """Press the button."""
+        command = self._command
+        if command.action and self._device.has_action(command.action):
+            # Prefer the action so Bond keeps its tracked state in sync.
+            await self._bond.action(
+                self._device_id, Action(command.action, command.argument)
+            )
+        else:
+            await self._bond.transmit_command(self._device_id, command.command_id)
 
     @override
     def _apply_state(self) -> None:

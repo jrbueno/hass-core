@@ -72,6 +72,11 @@ class BondDevice:
         """Check if Trust State is turned on."""
         return self.props.get("trust_state", False)  # type: ignore[no-any-return]
 
+    @property
+    def has_commands(self) -> bool:
+        """Return True if this is a bridge device with a commands endpoint."""
+        return "commands" in self._attrs
+
     def has_action(self, action: str) -> bool:
         """Check to see if the device supports an actions."""
         return action in self._supported_actions

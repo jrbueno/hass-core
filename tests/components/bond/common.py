@@ -3,7 +3,7 @@
 from contextlib import nullcontext
 from datetime import timedelta
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiohttp.client_exceptions import ClientResponseError
 from bond_async import DeviceType
@@ -201,6 +201,22 @@ def patch_bond_action_returns_clientresponseerror():
             request_info=None, history=None, status=405, message="Method Not Allowed"
         ),
     )
+
+
+def patch_bond_device_commands(commands: dict[str, dict[str, Any]], side_effect=None):
+    """Patch Bond API device commands endpoints with {command_id: command}."""
+    return patch.multiple(
+        "homeassistant.components.bond.Bond",
+        device_commands=AsyncMock(return_value=list(commands), side_effect=side_effect),
+        device_command=AsyncMock(
+            side_effect=lambda _device_id, command_id: commands[command_id]
+        ),
+    )
+
+
+def patch_bond_transmit_command():
+    """Patch Bond API command transmit endpoint."""
+    return patch("homeassistant.components.bond.Bond.transmit_command")
 
 
 def patch_bond_device_properties(return_value=None):
